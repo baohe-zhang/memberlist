@@ -2,6 +2,8 @@ package memberlist
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestTransmitLimited_Queue(t *testing.T) {
@@ -10,32 +12,34 @@ func TestTransmitLimited_Queue(t *testing.T) {
 	q.QueueBroadcast(&memberlistBroadcast{"foo", nil, nil})
 	q.QueueBroadcast(&memberlistBroadcast{"bar", nil, nil})
 
-	if len(q.bcQueue) != 3 {
+	if q.NumQueued() != 3 {
 		t.Fatalf("bad len")
 	}
-	if q.bcQueue[0].b.(*memberlistBroadcast).node != "test" {
+	dump := q.orderedView(true)
+	if dump[0].b.(*memberlistBroadcast).node != "test" {
 		t.Fatalf("missing test")
 	}
-	if q.bcQueue[1].b.(*memberlistBroadcast).node != "foo" {
+	if dump[1].b.(*memberlistBroadcast).node != "foo" {
 		t.Fatalf("missing foo")
 	}
-	if q.bcQueue[2].b.(*memberlistBroadcast).node != "bar" {
+	if dump[2].b.(*memberlistBroadcast).node != "bar" {
 		t.Fatalf("missing bar")
 	}
 
 	// Should invalidate previous message
 	q.QueueBroadcast(&memberlistBroadcast{"test", nil, nil})
 
-	if len(q.bcQueue) != 3 {
+	if q.NumQueued() != 3 {
 		t.Fatalf("bad len")
 	}
-	if q.bcQueue[0].b.(*memberlistBroadcast).node != "foo" {
+	dump = q.orderedView(true)
+	if dump[0].b.(*memberlistBroadcast).node != "foo" {
 		t.Fatalf("missing foo")
 	}
-	if q.bcQueue[1].b.(*memberlistBroadcast).node != "bar" {
+	if dump[1].b.(*memberlistBroadcast).node != "bar" {
 		t.Fatalf("missing bar")
 	}
-	if q.bcQueue[2].b.(*memberlistBroadcast).node != "test" {
+	if dump[2].b.(*memberlistBroadcast).node != "test" {
 		t.Fatalf("missing test")
 	}
 }
@@ -65,6 +69,8 @@ func TestTransmitLimited_GetBroadcasts(t *testing.T) {
 func TestTransmitLimited_GetBroadcasts_Limit(t *testing.T) {
 	q := &TransmitLimitedQueue{RetransmitMult: 1, NumNodes: func() int { return 10 }}
 
+	require.Equal(t, 2, retransmitLimit(q.RetransmitMult, q.NumNodes()), "sanity check transmit limits")
+
 	// 18 bytes per message
 	q.QueueBroadcast(&memberlistBroadcast{"test", []byte("1. this is a test."), nil})
 	q.QueueBroadcast(&memberlistBroadcast{"foo", []byte("2. this is a test."), nil})
@@ -73,20 +79,14 @@ func TestTransmitLimited_GetBroadcasts_Limit(t *testing.T) {
 
 	// 3 byte overhead, should only get 3 messages back
 	partial1 := q.GetBroadcasts(3, 80)
-	if len(partial1) != 3 {
-		t.Fatalf("missing messages: %v", partial1)
-	}
+	require.Equal(t, 3, len(partial1), "missing messages: %v", partial1)
 
 	partial2 := q.GetBroadcasts(3, 80)
-	if len(partial2) != 3 {
-		t.Fatalf("missing messages: %v", partial2)
-	}
+	require.Equal(t, 3, len(partial2), "missing messages: %v", partial2)
 
 	// Only two not expired
 	partial3 := q.GetBroadcasts(3, 80)
-	if len(partial3) != 2 {
-		t.Fatalf("missing messages: %v", partial3)
-	}
+	require.Equal(t, 2, len(partial3), "missing messages: %v", partial3)
 
 	// Should get nothing
 	partial5 := q.GetBroadcasts(3, 80)
@@ -126,47 +126,44 @@ func TestTransmitLimited_Prune(t *testing.T) {
 		t.Fatalf("expected invalidation")
 	}
 
-	if q.bcQueue[0].b.(*memberlistBroadcast).node != "bar" {
+	dump := q.orderedView(true)
+
+	if dump[0].b.(*memberlistBroadcast).node != "bar" {
 		t.Fatalf("missing bar")
 	}
-	if q.bcQueue[1].b.(*memberlistBroadcast).node != "baz" {
+	if dump[1].b.(*memberlistBroadcast).node != "baz" {
 		t.Fatalf("missing baz")
 	}
 }
 
-func TestLimitedBroadcastSort(t *testing.T) {
-	bc := limitedBroadcasts([]*limitedBroadcast{
-		&limitedBroadcast{
-			transmits: 0,
-		},
-		&limitedBroadcast{
-			transmits: 10,
-		},
-		&limitedBroadcast{
-			transmits: 3,
-		},
-		&limitedBroadcast{
-			transmits: 4,
-		},
-		&limitedBroadcast{
-			transmits: 7,
-		},
-	})
-	bc.Sort()
+func TestTransmitLimited_ordering(t *testing.T) {
+	q := &TransmitLimitedQueue{RetransmitMult: 1, NumNodes: func() int { return 10 }}
 
-	if bc[0].transmits != 10 {
-		t.Fatalf("bad val %v", bc[0])
+	insert := func(name string, transmits int) {
+		q.queueBroadcast(&memberlistBroadcast{name, []byte(name), make(chan struct{})}, transmits)
 	}
-	if bc[1].transmits != 7 {
-		t.Fatalf("bad val %v", bc[7])
+
+	insert("node0", 0)
+	insert("node1", 10)
+	insert("node2", 3)
+	insert("node3", 4)
+	insert("node4", 7)
+
+	dump := q.orderedView(true)
+
+	if dump[0].transmits != 10 {
+		t.Fatalf("bad val %v, %d", dump[0].b.(*memberlistBroadcast).node, dump[0].transmits)
 	}
-	if bc[2].transmits != 4 {
-		t.Fatalf("bad val %v", bc[2])
+	if dump[1].transmits != 7 {
+		t.Fatalf("bad val %v, %d", dump[7].b.(*memberlistBroadcast).node, dump[7].transmits)
 	}
-	if bc[3].transmits != 3 {
-		t.Fatalf("bad val %v", bc[3])
+	if dump[2].transmits != 4 {
+		t.Fatalf("bad val %v, %d", dump[2].b.(*memberlistBroadcast).node, dump[2].transmits)
 	}
-	if bc[4].transmits != 0 {
-		t.Fatalf("bad val %v", bc[4])
+	if dump[3].transmits != 3 {
+		t.Fatalf("bad val %v, %d", dump[3].b.(*memberlistBroadcast).node, dump[3].transmits)
+	}
+	if dump[4].transmits != 0 {
+		t.Fatalf("bad val %v, %d", dump[4].b.(*memberlistBroadcast).node, dump[4].transmits)
 	}
 }
